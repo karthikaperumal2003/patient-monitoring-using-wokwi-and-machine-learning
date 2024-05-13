@@ -1,1 +1,183 @@
-https://wokwi.com/projects/395601633851140097
+import machine
+import time
+import urequests
+import network
+import random
+
+# Wi-Fi configuration
+SSID = "Wokwi-Guest"
+PASSWORD = "_"
+
+# ThingSpeak configuration
+thingspeak_api_key = "95FJ0FAJD4U2VIJ0"
+thingspeak_channel_id = "2512400"
+
+wifi = network.WLAN(network.STA_IF)
+wifi.active(True)
+wifi.connect(SSID, PASSWORD)
+
+# Wait for the Wi-Fi connection to be established
+while not wifi.isconnected():
+    pass
+
+print("Connected to Wi-Fi")
+
+potentiometer_1_pin = machine.ADC(26)  # Analog pin for potentiometer 1 (heart rate)
+potentiometer_2_pin = machine.ADC(27)  # Analog pin for potentiometer 2 (respiratory rate)
+temperature_sensor_pin = machine.ADC(28)  # Analog pin for the NTC temperature sensor
+pir_sensor_pin = machine.Pin(14, machine.Pin.IN)  # GPIO14 - PIR sensor input
+
+# LED pins
+led1_pin = machine.Pin(4, machine.Pin.OUT)  # GP4 - Heart rate
+led2_pin = machine.Pin(5, machine.Pin.OUT)  # GP5 - Respiratory rate
+led3_pin = machine.Pin(3, machine.Pin.OUT)  # GP3 - Temperature
+led4_pin = machine.Pin(2, machine.Pin.OUT)  # GP2 - PIR sensor
+
+# Ultrasonic sensor pins
+ultrasonic_trigger_pin = machine.Pin(12, machine.Pin.OUT)  # GPIO12 - Ultrasonic sensor trigger pin
+ultrasonic_echo_pin = machine.Pin(13, machine.Pin.IN)     # GPIO13 - Ultrasonic sensor echo pin
+
+# Moving Average Filter Parameters
+filter_length = 5
+heart_rate_history = []
+respiratory_rate_history = []
+temperature_history = []
+
+# Flags for abnormal conditions
+heart_rate_abnormal = False
+respiratory_rate_abnormal = False
+temperature_abnormal = False
+pir_triggered = False
+
+# Function to apply moving average filter
+def moving_average(data_history, new_value, filter_length):
+    data_history.append(new_value)
+    if len(data_history) > filter_length:
+        data_history.pop(0)
+    return sum(data_history) / len(data_history)
+
+# Function to convert ADC value to temperature (randomize after every 5 times)
+def convert_to_temperature(adc_value, reading_count):
+    if (reading_count % 6) == 1:
+        # Generate a random temperature reading for every 6th reading
+        temperature = random.uniform(36.8, 40.2)
+    else:
+        # Keep temperature constant at 37 for the other readings
+        temperature = 37.0
+    return temperature
+
+# Function to measure distance using the ultrasonic sensor
+def measure_distance():
+    # Send a 10us pulse to trigger the ultrasonic sensor
+    ultrasonic_trigger_pin.on()
+    time.sleep_us(10)
+    ultrasonic_trigger_pin.off()
+
+    # Measure the duration of the pulse on the echo pin
+    pulse_duration = machine.time_pulse_us(ultrasonic_echo_pin, 1, 30000)  # Timeout set to 30ms (maximum distance)
+
+    # Convert the pulse duration to distance (in centimeters)
+    distance = (pulse_duration * 0.0343) / 2  # Speed of sound is approximately 343 m/s
+
+    return distance
+
+reading_count = 0  # Counter for the number of readings
+
+while True:
+    # Read normal values from potentiometers, temperature sensor, and PIR sensor
+    potentiometer_1_value = potentiometer_1_pin.read_u16()
+    potentiometer_2_value = potentiometer_2_pin.read_u16()
+    temperature_sensor_value = temperature_sensor_pin.read_u16()
+    pir_sensor_value = pir_sensor_pin.value()
+
+    # Apply variations to normal values
+    heart_rate = (potentiometer_1_value / 65535) * 60 + 60  # Adjust the formula based on your sensor characteristics
+    respiratory_rate = (potentiometer_2_value / 65535) * 10 + 10  # Adjust the formula based on your sensor characteristics
+    temperature = convert_to_temperature(temperature_sensor_value, reading_count)  # Convert NTC temperature sensor value to temperature
+
+    # Increment the reading count
+    reading_count += 1
+
+    # Check for abnormal conditions and blink LEDs accordingly
+    if heart_rate > 110:
+        print("Patient abnormal: High heart rate!")
+        print("SEND HELP, EMERGENCY!")
+        heart_rate_abnormal = True
+    elif heart_rate < 65:
+        print("Patient abnormal: Low heart rate!")
+        print("SEND HELP, EMERGENCY!")
+        heart_rate_abnormal = True
+    else:
+        heart_rate_abnormal = False
+
+    if respiratory_rate < 12:
+        print("Patient abnormal: Low respiratory rate!")
+        print("SEND HELP, EMERGENCY!")
+        respiratory_rate_abnormal = True
+    elif respiratory_rate > 18:
+        print("Patient abnormal: High respiratory rate!")
+        print("SEND HELP, EMERGENCY!")
+        respiratory_rate_abnormal = True
+    else:
+        respiratory_rate_abnormal = False
+
+    if temperature > 38:
+        print("Patient abnormal: High Temperature!")
+        print("SEND HELP, EMERGENCY!")
+        temperature_abnormal = True
+    elif temperature < 35:
+        print("Patient abnormal: Low Temperature!")
+        print("SEND HELP, EMERGENCY!")
+        temperature_abnormal = True
+    else:
+        temperature_abnormal = False
+
+    # PIR sensor logic
+    if pir_sensor_value == 1:
+        print("Motion detected!")
+        pir_triggered = True
+    else:
+        pir_triggered = False
+
+    # Ultrasonic sensor logic
+    distance = measure_distance()
+    if distance > 50:  # Adjust the threshold according to your setup
+        print("Patient has moved from the bed!")
+        # Take appropriate action here, such as sending an alert or activating a warning LED
+
+    # Blink LEDs for abnormal conditions
+    if heart_rate_abnormal:
+        led1_pin.on()
+    else:
+        led1_pin.off()
+
+    if respiratory_rate_abnormal:
+        led2_pin.on()
+    else:
+        led2_pin.off()
+
+    if temperature_abnormal:
+        led3_pin.on()
+    else:
+        led3_pin.off()
+
+    if pir_triggered:
+        led4_pin.on()
+    else:
+        led4_pin.off()
+
+    # Send data to ThingSpeak
+    url = "https://api.thingspeak.com/update?api_key={}&field1={}&field2={}&field3={}&field4={}&field5={}".format(
+        thingspeak_api_key, heart_rate, respiratory_rate, temperature, pir_triggered, distance)
+    response = urequests.post(url)
+    print("ThingSpeak Response:", response.text)
+    response.close()
+
+    # Print readings to the serial monitor
+    print("Heart Rate:", int(heart_rate), "bpm")
+    print("Respiratory Rate:", int(respiratory_rate), "breaths per minute")
+    print("Temperature:", int(temperature), "degrees Celsius")
+    print("PIR Triggered:", pir_triggered)
+    print("Distance:", distance, "cm")
+
+    time.sleep(30)  # Send readings to ThingSpeak every 30 seconds
